@@ -1,101 +1,194 @@
-import Image from "next/image";
+"use client";
+
+import { useState } from "react";
+import { DocType, File, IntentType } from "@/types/types";
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const [inputState, setInputState] = useState<{value: string, disabled: boolean}>({
+    value: "",
+    disabled: false
+  });
+  const [messages, setMessages] = useState<{ role: string; content: string }[]>(
+    []
+  );
+  const [files, setFiles] = useState<File[]>([]);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  const updateUIState = (
+    newMessages: { role: string; content: string }[],
+    disabled: boolean
+  ) => {
+    setMessages(newMessages);
+    setInputState({
+      value: disabled ? "Thinking..." : "",
+      disabled
+    });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputState.value.trim() || inputState.disabled) return;
+
+    const userInput = inputState.value;
+    const newMessages = [...messages, { role: "user", content: userInput }];
+    updateUIState(newMessages, true);
+
+    try {
+      // Classify intent
+      const classifyResponse = await fetch("/api/classify-intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: newMessages }),
+      });
+      if (!classifyResponse.ok) throw new Error("Failed to classify intent");
+      const { intent } = await classifyResponse.json();
+
+      if (intent === IntentType.RetrieveFiles) {
+        // Retrieve relevant documents
+        const retrieveResponse = await fetch("/api/retrieve-documents", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ latestMessage: userInput }),
+        });
+        if (!retrieveResponse.ok)
+          throw new Error("Failed to retrieve documents");
+        const { relevantDocs } = await retrieveResponse.json();
+
+        // Fetch new files if necessary
+        const filesToFetch = relevantDocs.filter(
+          (doc: DocType) =>
+            !files.some((file) => file.id === doc.metadata.datasetId)
+        );
+        if (filesToFetch.length > 0) {
+          const fetchResponse = await fetch("/api/fetch-file", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filesToFetch, existingFiles: files }),
+          });
+          if (!fetchResponse.ok) throw new Error("Failed to fetch files");
+          const { allFiles } = await fetchResponse.json();
+          setFiles(allFiles);
+        }
+      }
+
+      // Generate response
+      const generateResponse = await fetch("/api/generate-response", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: newMessages, allFiles: files }),
+      });
+      if (!generateResponse.ok) throw new Error("Failed to generate response");
+      const { message } = await generateResponse.json();
+      newMessages.push({ role: "assistant", content: message });
+
+
+    // Execute code interpretation
+    const interpretResponse = await fetch("/api/interpret-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: userInput }),
+    });
+    if (!interpretResponse.ok) throw new Error("Failed to interpret code");
+    const { output, logs, outputFiles } = await interpretResponse.json();
+    const executionResult = `Code execution output:\n${output}\n\nExecution logs:\n${logs.join("\n")}`;
+    newMessages.push({ role: "assistant", content: executionResult });
+
+    } catch (error) {
+      console.error("Error:", error);
+      newMessages.push({
+        role: "assistant",
+        content: "An error occurred while processing your request."
+      });
+    } finally {
+      updateUIState(newMessages, false);
+    }
+  };
+
+  const handleFileClick = (file: File) => {
+    setSelectedFile(file);
+  };
+
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-between p-24">
+      <div className="z-10 max-w-7xl w-full items-center justify-between font-mono text-sm">
+        <h1 className="text-4xl font-bold mb-8">Explore data.gov.sg</h1>
+        <div className="flex">
+          <div className="w-1/4 bg-gray-100 p-4 rounded-lg shadow mr-4">
+            <h2 className="text-xl font-bold mb-4">Retrieved Files</h2>
+            <ul>
+              {files.map((file) => (
+                <li
+                  key={file.id}
+                  className="cursor-pointer hover:bg-gray-200 p-2 rounded"
+                  onClick={() => handleFileClick(file)}
+                >
+                  {file.name}
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="w-3/4 bg-white p-4 rounded-lg shadow">
+            <div className="mb-4 h-80 overflow-y-auto">
+              {messages.map((msg, index) => (
+                <div
+                  key={index}
+                  className={`mb-2 ${
+                    msg.role === "user" ? "text-right" : "text-left"
+                  }`}
+                >
+                  <span
+                    className={`inline-block p-2 rounded-lg ${
+                      msg.role === "user" ? "bg-blue-100" : "bg-gray-100"
+                    }`}
+                  >
+                    {msg.content}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <form onSubmit={handleSubmit} className="flex">
+              <input
+                type="text"
+                value={inputState.disabled ? "Thinking..." : inputState.value}
+                onChange={(e) => setInputState({...inputState, value: e.target.value})}
+                className="flex-grow mr-2 p-2 border rounded"
+                placeholder="Type your message..."
+                disabled={inputState.disabled}
+                readOnly={inputState.disabled}
+              />
+              <button
+                type="submit"
+                className="bg-blue-500 text-white px-4 py-2 rounded"
+                disabled={inputState.disabled}
+              >
+                Send
+              </button>
+            </form>
+          </div>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+        {selectedFile && (
+          <div className="mt-4 bg-white p-4 rounded-lg shadow">
+            <h3 className="text-lg font-bold mb-2">{selectedFile.name}</h3>
+            <div className="mb-4">
+              <pre className="whitespace-pre-wrap bg-gray-100 p-2 rounded">
+                {Object.entries(selectedFile.metadata).map(([key, value]) => (
+                  <div key={key}>
+                    <strong>{key}:</strong> {value}
+                  </div>
+                ))}
+              </pre>
+            </div>
+            <div>
+              <h4 className="text-md font-semibold mb-2">Full Content:</h4>
+              <pre className="whitespace-pre-wrap bg-gray-100 p-2 rounded max-h-96 overflow-y-auto">
+                {typeof selectedFile.fullContent === "string"
+                  ? selectedFile.fullContent
+                  : JSON.stringify(selectedFile.fullContent, null, 2)}
+              </pre>
+            </div>
+          </div>
+        )}
+      </div>
+    </main>
   );
 }
